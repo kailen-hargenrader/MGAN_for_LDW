@@ -5,5 +5,8 @@ This repository contains the code for the monotone GANs generative model propose
 ## Authors
 
 Ricardo Baptista (Caltech), Nikola Kovachki (NVIDIA), Bamdad Hosseini (Washington), Youssef Marzouk (MIT)
-
 E-mails: rsb@caltech.edu, nkovachki@caltech.edu, bamdadh@uw.edu, ymarz@mit.edu
+
+## Kailen's Contributions
+
+Contained in Economics folder, mainly in Economics/learn_mgan.py.
