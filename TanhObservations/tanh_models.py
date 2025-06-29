@@ -52,10 +52,10 @@ class tanh_v1(tanh_example):
     def sample_data(self, x):
         N = x.shape[0]
         g = gamma.rvs(self.y_alpha, loc=0, scale=1./self.y_beta, size=(N,1))
-        return np.tanh(x) + g
+        return -np.tanh(x) + g
 
     def likelihood_function(self, x, y):
-        g = y - np.tanh(x)
+        g = y + np.tanh(x)
         return gamma.pdf(g, self.y_alpha, loc=0, scale=1./self.y_beta)
 
 class tanh_v2(tanh_example):

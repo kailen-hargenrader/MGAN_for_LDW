@@ -1,11 +1,13 @@
 import torch
+import torch.utils.data as data
 import torch.nn as nn
 import math
-from tanh_models import tanh_v1, tanh_v2, tanh_v3
 import numpy as np
 import argparse
-import kde
 import matplotlib.pyplot as plt
+import pyarrow.feather as feather
+import pandas as pd
+import kde
 
 #Fully Connected Feed Forward Network
 class FCFFNet(nn.Module):
@@ -40,13 +42,11 @@ class FCFFNet(nn.Module):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--monotone_param", type=float, default=.01, help="monotone penalty constant")
-parser.add_argument("--dataset", type=str, default='tanh_v2', help="one of: tanh_v1,tanh_v2,tanh_v3")
-parser.add_argument("--n_train", type=int, default=10000, help="number of training samples")
-parser.add_argument("--n_epochs", type=int, default=300, help="number of epochs")
+parser.add_argument("--n_epochs", type=int, default=100, help="number of epochs")
 parser.add_argument("--n_layers", type=int, default=3, help="number of layers in network")
 parser.add_argument("--n_units", type=int, default=128, help="number of hidden units in each layer")
 parser.add_argument("--batch_size", type=int, default=1000, help="batch size (Should divide Ntest)")
-parser.add_argument("--learning_rate", type=float, default=0.002, help="learning rate")
+parser.add_argument("--learning_rate", type=float, default=0.001, help="learning rate")
 args = parser.parse_args()
 
 torch.manual_seed(0)
@@ -54,29 +54,57 @@ torch.manual_seed(0)
 #Pick device: cuda, cpu
 device = torch.device('cpu')
 
-# define density
-dataset = args.dataset
-if dataset == 'tanh_v1':
-    pi = tanh_v1()
-elif dataset == 'tanh_v2':
-    pi = tanh_v2()
-elif dataset == 'tanh_v3':
-    pi = tanh_v3()
-else:
-    raise ValueError('Dataset is not recognized')
+#import data
+path = "C:\\Users\Kailen\MGAN\Economics\cps.feather"
+imported_df = feather.read_feather(path)
+imported_df.head()
 
-# load data (flipping x and y for supervised learning)
-y_train = pi.sample_prior(args.n_train)
-x_train = pi.sample_data(y_train)
-plt.scatter(y_train, x_train)
-plt.xlabel("y")
-plt.ylabel("x")
-plt.show()
-y_train = torch.from_numpy(y_train.astype(np.float32))
-x_train = torch.from_numpy(x_train.astype(np.float32))
+#get relevent columns
+y_tensor = torch.tensor(imported_df[["age"]].values.astype(np.float32))
+x_tensor = torch.tensor(imported_df[["re78"]].values.astype(np.float32))
 
+#normalize
+y_mean = torch.mean(y_tensor, dim=0)
+y_std = torch.std(y_tensor, dim=0)
+y_tensor = (y_tensor-y_mean)/y_std
+
+x_mean = torch.mean(x_tensor, dim=0)
+x_std = torch.std(x_tensor, dim=0)
+x_tensor = (x_tensor-x_mean)/x_std
+dataset = data.TensorDataset(x_tensor, y_tensor)
+
+#train-test split
+num_train = round(int(.9*len(dataset)),-3)
+num_test = len(dataset) - num_train
+train_set, test_set = torch.utils.data.random_split(dataset, [num_train, num_test])
+
+#define x and y
+x_train, y_train = train_set[:]
+y_train_np = y_train[:, 0].numpy()
+x_train_np = x_train[:, 0].numpy()
+
+x_test, y_test = test_set[:]
+y_test_np = y_test[:, 0].numpy()
+x_test_np = x_test[:, 0].numpy()
+# plt.scatter(y_test_np, x_test_np)
+# plt.xlabel("y")
+# plt.ylabel("x")
+# plt.show()
 dx = x_train.shape[1]
 dy = y_train.shape[1]
+
+#define real data for histogram comparison
+real20 = imported_df.query('18 <= age <= 22')[["re78"]].values.astype(np.float32)
+real30 = imported_df.query('28 <= age <= 32')[["re78"]].values.astype(np.float32)
+real40 = imported_df.query('38 <= age <= 42')[["re78"]].values.astype(np.float32)
+
+real = [real20, real30, real40]
+# plt.hist(real20, bins=200, density=True, label='$real x^* = '+str(20)+'$')
+# plt.hist(real30, bins=200, density=True, label='$real x^* = '+str(30)+'$')
+# plt.hist(real40, bins=200, density=True, label='$real x^* = '+str(40)+'$')
+# plt.xlim(0, 30000)
+# plt.legend()
+# plt.show()
 
 #Data loaders for training
 bsize = args.batch_size
@@ -155,8 +183,8 @@ for ep in range(args.n_epochs):
         #Monotonicity constraint
         mon_penalty = torch.sum(((Fz - F(z_prime)).view(bsize,-1))*((z2 - z2_prime).view(bsize,-1)), 1)
         if args.monotone_param > 0.0:
-            #F_loss = F_loss + args.monotone_param*torch.mean(softplus(-mon_penalty))# * (loss_difference))
-            F_loss = F_loss# + args.monotone_param*torch.mean(-mon_penalty)
+            F_loss = F_loss + args.monotone_param*torch.mean(softplus(-mon_penalty))# * (loss_difference))
+            # F_loss = F_loss + args.monotone_param*torch.mean(-mon_penalty)
         # take step for F
         F_loss.backward()
         optimizer_F.step()
@@ -178,101 +206,37 @@ for ep in range(args.n_epochs):
         D_loss.backward()
         optimizer_D.step()
         sch_D.step()
-
-        #Compute training loss
-        x_true = pi.sample_data(z1)
-        fz_store = Fz
-        loss_train_inner += mse_loss(fz_store, x_true).item()
-
-        ###Compute KDE loss###
-        Nsamples = 1000
-
-        #Choose x
-        x_float = -1.2 #torch.randn(1, dx, device = device).item()
-
-        # define domain
-        y_dom = [-10,10]
-        dy = (y_dom[1]-y_dom[0])/1000
-        yy = np.linspace(y_dom[0], y_dom[1], 1000)
-        yy = np.reshape(yy, (1000, 1))
-
-        # sample from conditional
-        xit = torch.tensor([x_float]).view(1,1)
-        xit = xit.repeat(Nsamples,1).to(device)
-        z = torch.randn(Nsamples, dx, device=device)
-        with torch.no_grad():
-            Fz = F(torch.cat((xit, z), 1))
-        Fz_numpy = Fz.cpu().numpy()
-
-        # define true joint and normalize to get posterior
-        post_i = pi.joint_pdf(np.array([[x_float]]), yy)
-        post_i_norm_const = np.trapz(post_i[:,0], x=yy[:,0])
-        post_i /= post_i_norm_const
-
-        #Kernel Density Estimation
-        kde_estimator = kde.KernelDensityEstimator(torch.cat((Fz, torch.zeros(Nsamples, 1, device=device)), 1), kernel = kde.GaussianKernel(bandwidth = .07))
-        
-        est_i = kde_estimator.forward(torch.cat((torch.from_numpy(yy), torch.zeros(Nsamples, 1, device=device)), 1))
-        est_i[est_i < 0.0] = 0
-        est_i[est_i > 0.0] = np.exp(est_i[est_i > 0.0])
-        area = torch.trapezoid(est_i, dx = dy)
-        est_i = est_i/area
-
-        #take MSE loss
-        kde_loss_inner += mse_loss(torch.from_numpy(post_i), est_i.resize(Nsamples, 1))
     F.eval()
     D.eval()
 
+    #define test number and normalize
+    test_num = 20
+    test_num_scaled = (test_num - y_mean) / y_std
 
+    if ep % 10 == 0:
+        z = torch.randn(1000, dx, device=device)
+        xs = torch.tensor([test_num_scaled]).view(1,1).repeat(1000,1).to(device)
+        with torch.no_grad():
+            Fz = F(torch.cat((xs, z), 1))
+        Fz_numpy = Fz.cpu().numpy()
+        # plt.hist(Fz_numpy * x_std.item() + x_mean.item(), bins=200, density=True, label='$generated x^* = '+str(test_num)+'$')
+
+        # #real data
+        # plt.hist(real20, bins=200, density=True, label='$real x^* = '+str(test_num)+'$')
+        # plt.legend()
+        # plt.show()
     #Average monotonicity percent over batches
-    mon_percent = mon_percent/math.ceil(float(args.n_train)/bsize)
+    mon_percent = mon_percent/math.ceil(float(len(x_train))/bsize)
     monotonicity[ep] = mon_percent
 
     #Average generator and discriminator losses
-    F_train[ep] = F_train_inner/math.ceil(float(args.n_train)/bsize)
-    D_train[ep] = D_train_inner/math.ceil(float(args.n_train)/bsize)
+    F_train[ep] = F_train_inner/math.ceil(float(len(x_train))/bsize)
+    D_train[ep] = D_train_inner/math.ceil(float(len(x_train))/bsize)
     if ep != 0:
         loss_difference = F_train[ep]-F_train[ep-1]
-    
-    #Average training data loss
-    loss_train[ep] = loss_train_inner/math.ceil(float(args.n_train)/bsize)
-
-    #Average kde loss
-    kde_loss[ep] = kde_loss_inner/math.ceil(float(args.n_train)/bsize)
-
-    if ep % 30 == 0:
-        # plt.plot(yy, post_i, label="post_i")
-        # plt.plot(yy, est_i, label="est_i")
-        # kde_samples = kde_estimator.sample(1000)
-        # plt.hist(kde_samples[:,0], bins=200, density=True, label='KDE_Hist')
-        # plt.show()
-
-        plt.scatter(z1, x_true, label="real")
-        plt.scatter(z1, fz_store.detach().numpy(), label="predict")
-        plt.xlabel("z1")
-        plt.ylabel("x_true/fz")
-        plt.legend()
-        plt.show()
 
     print('Epoch %3d, Monotonicity: %f, Generator loss: %f, Critic loss: %f' % \
          (ep, monotonicity[ep], F_train[ep], D_train[ep]))
-
-
-
-
-#plot post_i vs est_i
-plt.figure()
-plt.plot(yy, post_i, label="post_i")
-est_i = kde_estimator.forward(torch.cat((torch.from_numpy(yy), torch.zeros(Nsamples, 1, device=device)), 1))
-est_i[est_i < 0] = 0
-#est_i[est_i > 0.0] = np.exp(est_i[est_i > 0.0])
-area = torch.trapezoid(est_i, dx = dy)
-#est_i = est_i/area
-plt.plot(yy, est_i, label="est_i")
-kde_samples = kde_estimator.sample(1000)
-plt.hist(kde_samples[:,0], bins=200, density=True, label='KDE_Hist')
-plt.legend()
-plt.show()
 
 # Plot losses
 plt.figure()
@@ -286,31 +250,27 @@ plt.plot(np.arange(args.n_epochs), D_train.numpy(), label='Critic loss')
 plt.plot(np.arange(args.n_epochs), F_train.numpy(), label='Generator loss')
 plt.xlabel('Number of epochs')
 plt.legend()
-plt.subplot(1,4,3)
-plt.plot(np.arange(args.n_epochs), loss_train.numpy(), label='Training data loss')
-plt.xlabel('Number of epochs')
-plt.legend()
-plt.subplot(1,4,4)
-plt.plot(np.arange(args.n_epochs), kde_loss.numpy(), label='kde_loss')
-plt.xlabel('Number of epochs')
-plt.legend()
 plt.show()
 
 # Plot densities
 # define conditionals
-xst = [-1.2, 0, 1.2]
+xst_unscaled = np.array([20.0, 30.0, 40.0]).astype(np.float32)
 Ntest = 1000
 
 # define domain
-y_dom = [-10,10]
+y_dom = [-1000,30000]
 yy = np.linspace(y_dom[0], y_dom[1], 1000)
 yy = np.reshape(yy, (1000, 1))
+
+#scale
+xst = (xst_unscaled - y_mean.item()) / y_std.item()
+yy = (yy - x_mean.item()) / x_std.item()
 
 
 #Sample each conditional
 plt.figure()
 for i,xi in enumerate(xst):
-
+    plt.subplot(1,len(xst),i+1)
     # sample from conditional
     xit = torch.tensor([xi]).view(1,1)
     xit = xit.repeat(Ntest,1).to(device)
@@ -319,28 +279,21 @@ for i,xi in enumerate(xst):
         Fz = F(torch.cat((xit, z), 1))
     Fz_numpy = Fz.cpu().numpy()
 
-    # define true joint and normalize to get posterior
-    post_i = pi.joint_pdf(np.array([[xi]]), yy)
-    post_i_norm_const = np.trapz(post_i[:,0], x=yy[:,0])
-    post_i /= post_i_norm_const
+    #Kernel Density Estimation on truth
+    kde_estimator = kde.KernelDensityEstimator(torch.cat(((torch.tensor(real[i]) - x_mean.item()) / x_std.item(), torch.zeros(len(real[i]), 1, device=device)), 1), kernel = kde.GaussianKernel(bandwidth = .01))
+    est_i = kde_estimator.forward(torch.cat((torch.from_numpy(yy), torch.zeros(1000, 1, device=device)), 1))
 
-    #Kernel Density Estimation
-    kde_estimator = kde.KernelDensityEstimator(torch.cat((Fz, torch.zeros(Ntest, 1, device=device)), 1), kernel = kde.GaussianKernel(bandwidth = .07))
-    kde_samples = kde_estimator.sample(1000)
+    est_i[est_i < 0] = 0
+    est_i[est_i > 0.0] = np.exp(est_i[est_i > 0.0])
 
-        
+    area = torch.trapezoid(est_i, dx = (y_dom[1]-y_dom[0])/1000)
+    est_i = est_i/area
+    plt.plot(yy * x_std.item() + x_mean.item(), est_i, label="est_i")
+ 
     # plot density and samples
-    plt.subplot(1,2,1)
-    plt.plot(yy, post_i)
-    plt.hist(Fz_numpy, bins=200, density=True, label='$x^* = '+str(xi)+'$')
+    plt.hist(Fz_numpy * x_std.item() + x_mean.item(), bins=200, density=True, label='$x^* = '+str(xst_unscaled[i])+'$')
+    #plt.hist(real[i], bins=200, density=True, label='$x^* = '+str(xst_unscaled[i])+'$')
     plt.legend()
-    plt.subplot(1,2,2)
-    plt.plot(yy, post_i)
-    plt.hist(kde_samples[:,0], bins=200, density=True, label='KDE | $x^* = '+str(xi)+'$')
-    plt.legend()
-plt.xlabel('$y$')
-plt.ylabel('$\pi(y|x^*)$')
-plt.subplot(1,2,1)
-plt.xlabel('$y$')
-plt.ylabel('$\pi(y|x^*)$')
+    plt.xlabel('$y$')
+    plt.ylabel('$\pi(y|x^*)$')
 plt.show()
